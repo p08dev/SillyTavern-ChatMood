@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Patrick D. Rupp",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "homePage": "https://github.com/p08dev/SillyTavern-ChatMood",
     "auto_update": false,
     "i18n": {

@@ -89,6 +89,12 @@
         getKeywordLanguage() {
             return getKeywordLanguage();
         },
+        getMbtiInferenceLanguage() {
+            return getMbtiInferenceLanguage();
+        },
+        getTokenSaverMode() {
+            return getTokenSaverMode();
+        },
     };
 
     const engine = window.ChatMoodEmotionEngine.createEmotionEngine(api);
@@ -131,6 +137,40 @@
         const context = ctx();
         if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
         context.extensionSettings.ChatMood.keywordLanguage = value === 'de' ? 'de' : 'en';
+        context.saveSettingsDebounced();
+    }
+
+    // ── MBTI/archetype inference language ───────────────────────────────────
+    // Governs inferMBTIFromCharacter/applyPersonaArchetypeBias, which run once
+    // per chat directly against the character card's free text — independent
+    // of keywordLanguage above (that's for scoring chat messages, not cards).
+    // Read live by the engine (no reload needed), but state.mbtiType is only
+    // computed once per chat and then persisted, so changing this only affects
+    // *new* baselines (a fresh chat, or an existing one after "Reset mood to
+    // baseline") — not chats that already have a stored mbtiType.
+    function getMbtiInferenceLanguage() {
+        const value = ctx().extensionSettings.ChatMood?.mbtiInferenceLanguage;
+        return (value === 'de' || value === 'both') ? value : 'en';
+    }
+
+    function setMbtiInferenceLanguage(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.mbtiInferenceLanguage = (value === 'de' || value === 'both') ? value : 'en';
+        context.saveSettingsDebounced();
+    }
+
+    // ── Token saver mode ─────────────────────────────────────────────────────
+    // Read live by buildEmotionContext() (rebuilt every turn already), so this
+    // takes effect on the very next message — no reload needed.
+    function getTokenSaverMode() {
+        return !!ctx().extensionSettings.ChatMood?.tokenSaverMode;
+    }
+
+    function setTokenSaverMode(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.tokenSaverMode = !!value;
         context.saveSettingsDebounced();
     }
 
@@ -783,12 +823,24 @@
                             <input type="checkbox" id="chatmood_enabled_by_default"${getEnabledByDefault() ? ' checked' : ''}>
                             ${tr('Enabled by default')}
                         </label>
+                        <label class="checkbox_label" for="chatmood_token_saver_mode">
+                            <input type="checkbox" id="chatmood_token_saver_mode"${getTokenSaverMode() ? ' checked' : ''}>
+                            ${tr('Token saver mode')}
+                        </label>
+                        <small>${tr('Skips the temperament line in the prompt to save tokens — the character\'s core personality is static, so the model picks it up from the conversation itself.')}</small>
                         <label for="chatmood_keyword_language">${tr('Keyword matching language')}</label>
                         <select id="chatmood_keyword_language">
                             <option value="en"${getKeywordLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
                             <option value="de"${getKeywordLanguage() === 'de' ? ' selected' : ''}>${tr('German')}</option>
                         </select>
                         <small>${tr('Which language the mood-scoring keyword list is matched against. Requires reloading SillyTavern to take effect.')}</small>
+                        <label for="chatmood_mbti_inference_language">${tr('Personality inference language')}</label>
+                        <select id="chatmood_mbti_inference_language">
+                            <option value="en"${getMbtiInferenceLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
+                            <option value="de"${getMbtiInferenceLanguage() === 'de' ? ' selected' : ''}>${tr('German')}</option>
+                            <option value="both"${getMbtiInferenceLanguage() === 'both' ? ' selected' : ''}>${tr('English + German')}</option>
+                        </select>
+                        <small>${tr('Which language(s) are used to detect a character\'s MBTI temperament and archetype from their character card. Takes effect on the next new chat, or after "Reset mood to baseline" for an existing one — no reload needed.')}</small>
                         <label for="chatmood_user_weight">
                             ${tr('User message influence')}: <span id="chatmood_user_weight_val">${userWeight.toFixed(1)}</span>
                         </label>
@@ -810,6 +862,15 @@
             // The current chat's badge/rows may themselves be relying on
             // this default (no explicit per-chat override yet).
             refreshAll();
+        });
+
+        jQuery('#chatmood_token_saver_mode').on('change', (e) => {
+            setTokenSaverMode(e.target.checked);
+            refreshAll();
+        });
+
+        jQuery('#chatmood_mbti_inference_language').on('change', (e) => {
+            setMbtiInferenceLanguage(e.target.value);
         });
 
         jQuery('#chatmood_keyword_language').on('change', async (e) => {

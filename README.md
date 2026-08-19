@@ -20,6 +20,11 @@ prompt, so their tone shifts with how the conversation has actually gone.
 - Switchable keyword-matching language (English or German), including
   matching negation/intensity words in that language — takes effect after
   reloading SillyTavern.
+- Character-card personality inference (MBTI temperament + archetype bias)
+  checks English, German, or both — independent of the keyword-matching
+  language, since a character card's language doesn't have to match it.
+- Token saver mode — drops the temperament line from the injected prompt,
+  the single most expensive part of it.
 - i18n (German) for the UI — the LLM prompt itself always stays in English
   regardless of UI language (see below).
 
@@ -60,12 +65,15 @@ Express this through tone, phrasing, and energy — do not name or announce emot
 - Up to 4 emotions are listed (any at ≥12%, highest first).
 - The `Bond:` line only appears once enough long-term trust/joy has
   drifted up or down — omitted in the neutral middle range.
+- The `Temperament:` line is omitted entirely when token saver mode is on.
 - Nothing is injected if mood is disabled for the chat, or no chat is open.
 
 ## Settings
 
 SillyTavern → Extensions panel → **ChatMood**: enable-by-default toggle,
-keyword-matching language (English/German, requires a reload), message-
+token saver mode, keyword-matching language (English/German, requires a
+reload), personality inference language (English/German/both, for MBTI +
+archetype detection from the character card — no reload needed), message-
 weighting sliders, and a reset-to-baseline button for the chat you're
 currently in.
 
