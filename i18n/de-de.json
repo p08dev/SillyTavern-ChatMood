@@ -12,6 +12,8 @@
     "Enabled by default": "Standardmäßig aktiviert",
     "Token saver mode": "Token-Spar-Modus",
     "Skips the temperament line in the prompt to save tokens — the character's core personality is static, so the model picks it up from the conversation itself.": "Lässt die Temperament-Zeile im Prompt weg, um Tokens zu sparen — die Grundpersönlichkeit des Charakters ändert sich ohnehin nicht, das Modell erkennt sie bereits aus dem bisherigen Gesprächsverlauf.",
+    "Static position (above chat box)": "Statische Position (über dem Chatfenster)",
+    "Pins the mood button and popup in a fixed spot above the chat box instead of letting you drag them around.": "Fixiert den Stimmungs-Button und das Popup an einer festen Stelle über dem Chatfenster, statt sie frei verschiebbar zu machen.",
     "Keyword matching language": "Sprache der Stimmungserkennung",
     "English": "Englisch",
     "German": "Deutsch",

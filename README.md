@@ -9,8 +9,9 @@ prompt, so their tone shifts with how the conversation has actually gone.
 - 9-axis Plutchik mood (love, joy, trust, fear, surprise, sadness, disgust,
   anger, anticipation), stored per chat — a new chat with the same character
   starts fresh.
-- Draggable floating badge showing the dominant emotion; click for a
-  breakdown popup (also draggable).
+- Floating badge showing the dominant emotion; click for a breakdown
+  popup. By default both are pinned in a static spot above the chat box;
+  optionally switch to a draggable, freely-positioned badge/popup instead.
 - Delta burst animation showing what just changed, above the message input.
 - Edit mode — drag the bars or type exact values to set mood by hand.
 - Per-chat enable/disable toggle, plus a global default for new chats.
@@ -71,11 +72,13 @@ Express this through tone, phrasing, and energy — do not name or announce emot
 ## Settings
 
 SillyTavern → Extensions panel → **ChatMood**: enable-by-default toggle,
-token saver mode, keyword-matching language (English/German, requires a
-reload), personality inference language (English/German/both, for MBTI +
-archetype detection from the character card — no reload needed), message-
-weighting sliders, and a reset-to-baseline button for the chat you're
-currently in.
+token saver mode, static position (on by default — pins the badge/popup
+above the chat box instead of letting you drag them, so they can never end
+up positioned off-screen), keyword-matching language (English/German,
+requires a reload), personality inference language (English/German/both,
+for MBTI + archetype detection from the character card — no reload
+needed), message-weighting sliders, and a reset-to-baseline button for the
+chat you're currently in.
 
 ## Installation
 

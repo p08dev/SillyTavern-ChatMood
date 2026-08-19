@@ -45,6 +45,20 @@
     transition: none;
 }
 
+/* Static position mode has no drag handlers attached — grab/grabbing
+   cursors would be misleading. It also drops the text label: pinned in a
+   fixed spot right above the chat box, an icon-only button reads fine and
+   takes up less permanent space than a full pill. */
+.cm-badge.cm-badge-static {
+    cursor: pointer;
+    padding: 3px;
+    gap: 0;
+}
+
+.cm-badge.cm-badge-static .cm-badge-label {
+    display: none;
+}
+
 .cm-badge.cm-badge-hidden {
     opacity: 0;
     transform: scale(0.5);
@@ -125,6 +139,10 @@
 
 .cm-popup.cm-popup-dragging .cm-popup-header {
     cursor: grabbing;
+}
+
+.cm-popup.cm-popup-static .cm-popup-header {
+    cursor: default;
 }
 
 .cm-popup-header span {

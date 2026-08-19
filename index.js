@@ -117,6 +117,22 @@
         return ctx().extensionSettings.ChatMood?.enabledByDefault !== false;
     }
 
+    // ── Static position mode ─────────────────────────────────────────────────
+    // Pins the badge + popup above the chat box (#send_form) instead of the
+    // free-floating draggable position. Default (opt-out, not opt-in): it
+    // can't end up off-screen, unlike a saved drag position, so it's the
+    // safer default — users who want to drag it around can turn this off.
+    function isStaticPositionEnabled() {
+        return ctx().extensionSettings.ChatMood?.staticPosition !== false;
+    }
+
+    function setStaticPositionEnabled(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.staticPosition = !!value;
+        context.saveSettingsDebounced();
+    }
+
     function setEnabledByDefault(value) {
         const context = ctx();
         if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
@@ -264,7 +280,7 @@
             const raw = localStorage.getItem(BADGE_POS_KEY);
             if (!raw) return null;
             const pos = JSON.parse(raw);
-            if (typeof pos.left === 'number' && typeof pos.top === 'number') return pos;
+            if (Number.isFinite(pos.left) && Number.isFinite(pos.top)) return pos;
         } catch (e) { /* ignore */ }
         return null;
     }
@@ -275,19 +291,39 @@
         } catch (e) { /* ignore */ }
     }
 
-    function applyBadgePosition(badgeEl) {
-        const size = 120; // approx outer width (pill w/ label) before layout is known
+    function applyStaticBadgePosition(badgeEl) {
+        const sendForm = document.getElementById('send_form');
+        if (!sendForm) return applyDraggableBadgePosition(badgeEl);
+        const rect = sendForm.getBoundingClientRect();
+        const height = badgeEl.offsetHeight || 38;
+        badgeEl.style.left = `${Math.max(0, rect.left)}px`;
+        badgeEl.style.top = `${Math.max(0, rect.top - height - 8)}px`;
+    }
+
+    function applyDraggableBadgePosition(badgeEl) {
+        // Measured *after* the element is in the DOM (see ensureBadge) so
+        // this reflects the real pill size — which varies with the label's
+        // text length (e.g. German "Nachdenklichkeit" vs. English "Sadness")
+        // — rather than a guessed constant that could under-clamp and leave
+        // part of the badge past the actual edge of the screen.
+        const width = badgeEl.offsetWidth || 120;
+        const height = badgeEl.offsetHeight || 38;
         const saved = loadBadgePosition();
         let left, top;
         if (saved) {
-            left = Math.max(0, Math.min(window.innerWidth - size, saved.left));
-            top = Math.max(0, Math.min(window.innerHeight - size, saved.top));
+            left = Math.max(0, Math.min(window.innerWidth - width, saved.left));
+            top = Math.max(0, Math.min(window.innerHeight - height, saved.top));
         } else {
             left = 20;
-            top = window.innerHeight - 110;
+            top = window.innerHeight - height - 72;
         }
         badgeEl.style.left = `${left}px`;
         badgeEl.style.top = `${top}px`;
+    }
+
+    function applyBadgePosition(badgeEl) {
+        if (isStaticPositionEnabled()) applyStaticBadgePosition(badgeEl);
+        else applyDraggableBadgePosition(badgeEl);
     }
 
     function makeBadgeDraggable(badgeEl) {
@@ -364,7 +400,7 @@
         if (jQuery('#cm-badge').length) return;
         const portal = ensurePortal();
         const badge = jQuery(`
-            <div id="cm-badge" class="cm-badge" title="${tr('Mood')}">
+            <div id="cm-badge" class="cm-badge${isStaticPositionEnabled() ? ' cm-badge-static' : ''}" title="${tr('Mood')}">
                 <span class="cm-badge-icon"><i class="fa-solid fa-face-smile"></i></span>
                 <span class="cm-badge-label">${tr('Neutral')}</span>
             </div>`);
@@ -376,7 +412,7 @@
         badge.addClass('cm-badge-hidden');
         portal.appendChild(badge[0]);
         applyBadgePosition(badge[0]);
-        makeBadgeDraggable(badge[0]);
+        if (!isStaticPositionEnabled()) makeBadgeDraggable(badge[0]);
         // Fade in on first appearance too, not just when reappearing after
         // the popup closes.
         requestAnimationFrame(() => badge.removeClass('cm-badge-hidden'));
@@ -463,7 +499,7 @@
         const editTitle = editing ? tr('Exit edit mode') : tr('Edit mood values');
 
         return `
-            <div id="cm-popup" class="cm-popup">
+            <div id="cm-popup" class="cm-popup${isStaticPositionEnabled() ? ' cm-popup-static' : ''}">
                 <div class="cm-popup-header">
                     <i class="fa-solid fa-heart-pulse"></i>
                     <span>${tr('Mood')}</span>
@@ -485,7 +521,7 @@
             const raw = localStorage.getItem(POPUP_POS_KEY);
             if (!raw) return null;
             const pos = JSON.parse(raw);
-            if (typeof pos.left === 'number' && typeof pos.top === 'number') return pos;
+            if (Number.isFinite(pos.left) && Number.isFinite(pos.top)) return pos;
         } catch (e) { /* ignore */ }
         return null;
     }
@@ -496,7 +532,22 @@
         } catch (e) { /* ignore */ }
     }
 
-    function positionPopup() {
+    function applyStaticPopupPosition() {
+        const popup = jQuery('#cm-popup');
+        if (!popup.length) return;
+        const sendForm = document.getElementById('send_form');
+        if (!sendForm) return applyDraggablePopupPosition();
+
+        const popupWidth = popup.outerWidth() || 280;
+        const popupHeight = popup.outerHeight() || 300;
+        const gap = 8;
+        const rect = sendForm.getBoundingClientRect();
+        const left = Math.max(gap, Math.min(rect.left, window.innerWidth - popupWidth - gap));
+        const top = Math.max(gap, rect.top - popupHeight - gap);
+        popup.css({ left: `${left}px`, top: `${top}px`, bottom: 'auto', right: 'auto' });
+    }
+
+    function applyDraggablePopupPosition() {
         const popup = jQuery('#cm-popup');
         if (!popup.length) return;
 
@@ -520,6 +571,11 @@
         }
 
         popup.css({ left: `${left}px`, top: `${top}px`, bottom: 'auto', right: 'auto' });
+    }
+
+    function positionPopup() {
+        if (isStaticPositionEnabled()) applyStaticPopupPosition();
+        else applyDraggablePopupPosition();
     }
 
     function makePopupDraggable(popupEl) {
@@ -697,8 +753,10 @@
         jQuery('#cm-badge').after(buildPopupHtml());
         positionPopup();
         requestAnimationFrame(() => jQuery('#cm-popup').addClass('cm-popup-open'));
-        const popupEl = document.getElementById('cm-popup');
-        if (popupEl) makePopupDraggable(popupEl);
+        if (!isStaticPositionEnabled()) {
+            const popupEl = document.getElementById('cm-popup');
+            if (popupEl) makePopupDraggable(popupEl);
+        }
 
         // Echoes EchoText's own FAB/panel relationship: the button hides while
         // its window is open, and reappears once it's closed. Unlike the
@@ -714,8 +772,10 @@
         // Not a fresh open — skip the fade-in, just keep it visibly open.
         jQuery('#cm-popup').addClass('cm-popup-open');
         positionPopup();
-        const popupEl = document.getElementById('cm-popup');
-        if (popupEl) makePopupDraggable(popupEl);
+        if (!isStaticPositionEnabled()) {
+            const popupEl = document.getElementById('cm-popup');
+            if (popupEl) makePopupDraggable(popupEl);
+        }
     }
 
     // ── Delta burst: brief floating chips above the send form ──────────────
@@ -828,6 +888,11 @@
                             ${tr('Token saver mode')}
                         </label>
                         <small>${tr('Skips the temperament line in the prompt to save tokens — the character\'s core personality is static, so the model picks it up from the conversation itself.')}</small>
+                        <label class="checkbox_label" for="chatmood_static_position">
+                            <input type="checkbox" id="chatmood_static_position"${isStaticPositionEnabled() ? ' checked' : ''}>
+                            ${tr('Static position (above chat box)')}
+                        </label>
+                        <small>${tr('Pins the mood button and popup in a fixed spot above the chat box instead of letting you drag them around.')}</small>
                         <label for="chatmood_keyword_language">${tr('Keyword matching language')}</label>
                         <select id="chatmood_keyword_language">
                             <option value="en"${getKeywordLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
@@ -866,6 +931,18 @@
 
         jQuery('#chatmood_token_saver_mode').on('change', (e) => {
             setTokenSaverMode(e.target.checked);
+            refreshAll();
+        });
+
+        jQuery('#chatmood_static_position').on('change', (e) => {
+            setStaticPositionEnabled(e.target.checked);
+            // ensureBadge() no-ops if #cm-badge already exists, so it won't
+            // pick up the new mode (static anchor vs. draggable position, and
+            // whether drag handlers get attached) on its own — force a
+            // rebuild. refreshPopupIfOpen() (called via refreshAll() below)
+            // already rebuilds the popup unconditionally, so it needs no
+            // equivalent nudge here.
+            jQuery('#cm-badge').remove();
             refreshAll();
         });
 
@@ -926,6 +1003,16 @@
         const { eventSource, event_types } = context;
 
         renderSettingsPanel();
+
+        // The clamp in applyBadgePosition/positionPopup only runs when the
+        // element is (re)created — without this, a badge/popup already
+        // positioned near an edge would stay stranded off-screen after a
+        // later window resize/orientation change instead of re-clamping.
+        window.addEventListener('resize', () => {
+            const badgeEl = document.getElementById('cm-badge');
+            if (badgeEl) applyBadgePosition(badgeEl);
+            if (jQuery('#cm-popup').length) positionPopup();
+        });
 
         eventSource.on(event_types.CHAT_CHANGED, () => {
             turnImpactBaseline = null;
