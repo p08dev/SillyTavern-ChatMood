@@ -1,0 +1,59 @@
+{
+    "Mood": "Stimmung",
+    "Neutral": "Neutral",
+    "Disabled": "Deaktiviert",
+    "Mood disabled for this chat — click to re-enable": "Stimmung für diesen Chat deaktiviert — zum Reaktivieren klicken",
+    "Mood: ${0} (${1}%)": "Stimmung: ${0} (${1}%)",
+    "Enable mood for this chat": "Stimmung für diesen Chat aktivieren",
+    "Disable mood for this chat": "Stimmung für diesen Chat deaktivieren",
+    "Last change": "Letzte Änderung",
+    "Edit mood values": "Stimmungswerte bearbeiten",
+    "Exit edit mode": "Bearbeitungsmodus verlassen",
+    "Enabled by default": "Standardmäßig aktiviert",
+    "Keyword matching language": "Sprache der Stimmungserkennung",
+    "English": "Englisch",
+    "German": "Deutsch",
+    "Which language the mood-scoring keyword list is matched against. Requires reloading SillyTavern to take effect.": "In welcher Sprache die Stimmung anhand von Schlüsselwörtern erkannt wird. Erfordert einen Neustart von SillyTavern, um wirksam zu werden.",
+    "ChatMood needs to reload SillyTavern for the new keyword language to take effect. Reload now?": "ChatMood muss SillyTavern neu laden, damit die neue Sprache für die Stimmungserkennung wirksam wird. Jetzt neu laden?",
+    "User message influence": "Einfluss der Nutzernachricht",
+    "Character reply influence": "Einfluss der Charakterantwort",
+    "How strongly each side of the exchange moves the mood needle. 0 ignores it entirely; 1 is normal; higher amplifies it.": "Wie stark jede Seite des Austauschs die Stimmung beeinflusst. 0 ignoriert sie vollständig; 1 ist normal; höher verstärkt sie.",
+    "Reset mood to baseline (current chat)": "Stimmung auf Ausgangswert zurücksetzen (aktueller Chat)",
+    "Reset this chat's mood back to its starting baseline? This cannot be undone.": "Die Stimmung dieses Chats auf den Ausgangswert zurücksetzen? Dies kann nicht rückgängig gemacht werden.",
+
+    "Love": "Liebe",
+    "Fondness": "Zuneigung",
+    "Adoration": "Verehrung",
+
+    "Joy": "Freude",
+    "Serenity": "Gelassenheit",
+    "Ecstasy": "Ekstase",
+
+    "Trust": "Vertrauen",
+    "Acceptance": "Akzeptanz",
+    "Admiration": "Bewunderung",
+
+    "Fear": "Angst",
+    "Apprehension": "Besorgnis",
+    "Terror": "Schrecken",
+
+    "Surprise": "Überraschung",
+    "Distraction": "Ablenkung",
+    "Amazement": "Erstaunen",
+
+    "Sadness": "Traurigkeit",
+    "Pensiveness": "Nachdenklichkeit",
+    "Grief": "Trauer",
+
+    "Disgust": "Ekel",
+    "Boredom": "Langeweile",
+    "Loathing": "Abscheu",
+
+    "Anger": "Wut",
+    "Annoyance": "Ärger",
+    "Rage": "Raserei",
+
+    "Anticipation": "Vorfreude",
+    "Interest": "Interesse",
+    "Vigilance": "Wachsamkeit"
+}

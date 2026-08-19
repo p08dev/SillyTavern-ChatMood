@@ -1,0 +1,902 @@
+// ChatMood - persistent per-chat emotional state for SillyTavern's main chat.
+// Ports EchoText's Plutchik emotion engine (see lib/emotion-engine.js) to run
+// against the main chat window instead of EchoText's own side panel: state is
+// stored per-chat (chat_metadata), not per-character, and has no time-based
+// decay — mood only changes when a message is actually processed.
+
+(function () {
+    'use strict';
+
+    // ── Module loading (same synchronous-XHR pattern as SillyTavern-EchoText) ──
+
+    const scripts = document.querySelectorAll('script[src*="index.js"]');
+    let BASE_URL = '';
+    for (const script of scripts) {
+        if (script.src.includes('ChatMood')) {
+            try {
+                const urlObj = new URL(script.src, window.location.href);
+                BASE_URL = urlObj.origin + urlObj.pathname.split('/').slice(0, -1).join('/');
+            } catch (e) {
+                BASE_URL = script.src.split('?')[0].split('/').slice(0, -1).join('/');
+            }
+            break;
+        }
+    }
+    if (!BASE_URL) {
+        BASE_URL = '/scripts/extensions/third-party/ChatMood';
+    }
+
+    function loadChatMoodModule(relativePath, globalKey) {
+        if (window[globalKey]) return;
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', `${BASE_URL}/${relativePath}`, false);
+        xhr.send();
+        if (xhr.status < 200 || xhr.status >= 300) {
+            console.error(`[ChatMood] Failed to load module ${relativePath}: HTTP ${xhr.status}`);
+            throw new Error(`Failed to load module ${relativePath}: HTTP ${xhr.status}`);
+        }
+        // eslint-disable-next-line no-new-func
+        new Function(xhr.responseText)();
+        if (!window[globalKey]) {
+            throw new Error(`Module loaded but global '${globalKey}' is missing (${relativePath})`);
+        }
+    }
+
+    loadChatMoodModule('lib/emotion-engine.js', 'ChatMoodEmotionEngine');
+
+    // ── ST context helpers ──────────────────────────────────────────────────
+    // Re-fetch getContext() on every access rather than caching it once: ST
+    // reassigns chat_metadata to a new object on every chat switch, so a
+    // cached reference would go stale after CHAT_CHANGED.
+
+    function ctx() {
+        return SillyTavern.getContext();
+    }
+
+    // UI chrome strings only — Plutchik emotion/intensity names (Love, Joy,
+    // Fondness, Ecstasy, ...) stay in English: they double as the text sent
+    // to the LLM in buildEmotionContext(), which shouldn't follow the UI
+    // language. Uses the English text itself as the translation-file key,
+    // matching ST's own translate() default (see i18n/de-de.json).
+    function tr(text) {
+        return ctx().translate(text);
+    }
+
+    // extension_prompt_types.IN_PROMPT = 0, extension_prompt_roles.SYSTEM = 0
+    // (not exposed via getContext(); values per public/script.js).
+    const EXTENSION_PROMPT_TYPE_IN_PROMPT = 0;
+    const EXTENSION_PROMPT_ROLE_SYSTEM = 0;
+    const PROMPT_KEY = 'ChatMood';
+    const DISABLED_COLOR = '#888888';
+
+    const api = {
+        baseUrl: BASE_URL,
+        getState() {
+            return ctx().chatMetadata?.chatMood || null;
+        },
+        saveState(state) {
+            const context = ctx();
+            context.chatMetadata.chatMood = state;
+            context.saveMetadataDebounced();
+        },
+        getCurrentCharacter() {
+            const context = ctx();
+            return context.characters?.[context.characterId] || null;
+        },
+        getChatHistory() {
+            return ctx().chat || [];
+        },
+        getKeywordLanguage() {
+            return getKeywordLanguage();
+        },
+    };
+
+    const engine = window.ChatMoodEmotionEngine.createEmotionEngine(api);
+
+    function hasOpenChat() {
+        // Group chats aren't supported yet — a single per-chat mood would
+        // blend every member's messages into one number, which reads as
+        // wrong once more than one character is involved. Disabled outright
+        // until per-character tracking is built.
+        return !!ctx().getCurrentChatId() && !ctx().groupId;
+    }
+
+    // ── Global default + per-chat disable toggle ────────────────────────────
+    // Per-chat state lives in chat_metadata, same as the mood state itself —
+    // an explicit toggle applies to just that chat. Chats that have never
+    // been explicitly toggled (chatMoodDisabled === undefined) fall back to
+    // the global "enabled by default" setting below.
+
+    function getEnabledByDefault() {
+        return ctx().extensionSettings.ChatMood?.enabledByDefault !== false;
+    }
+
+    function setEnabledByDefault(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.enabledByDefault = value;
+        context.saveSettingsDebounced();
+    }
+
+    // ── Keyword matching language ───────────────────────────────────────────
+    // Read once by the engine when it's created (module load) — the keyword
+    // dictionary is fetched synchronously at that point, so changing this
+    // setting only takes effect after a reload (same as ST's own UI-language
+    // switch).
+    function getKeywordLanguage() {
+        return ctx().extensionSettings.ChatMood?.keywordLanguage === 'de' ? 'de' : 'en';
+    }
+
+    function setKeywordLanguage(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.keywordLanguage = value === 'de' ? 'de' : 'en';
+        context.saveSettingsDebounced();
+    }
+
+    // ── Message-weighting settings ──────────────────────────────────────────
+    // How strongly the user's message vs. the character's own reply moves the
+    // needle in engine.analyzeTextEmotion — defaults match the reasoning
+    // already baked into the engine (character's reply is the more direct
+    // signal of felt emotion), but configurable per the settings panel.
+    const DEFAULT_USER_WEIGHT = 0.6;
+    const DEFAULT_CHAR_WEIGHT = 1.0;
+
+    function getMessageWeight(isUser) {
+        const settings = ctx().extensionSettings.ChatMood;
+        const raw = isUser ? settings?.userMessageWeight : settings?.charMessageWeight;
+        const fallback = isUser ? DEFAULT_USER_WEIGHT : DEFAULT_CHAR_WEIGHT;
+        return typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback;
+    }
+
+    function setMessageWeight(isUser, value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood[isUser ? 'userMessageWeight' : 'charMessageWeight'] = value;
+        context.saveSettingsDebounced();
+    }
+
+    function isMoodDisabledForChat() {
+        const explicit = ctx().chatMetadata?.chatMoodDisabled;
+        if (typeof explicit === 'boolean') return explicit;
+        return !getEnabledByDefault();
+    }
+
+    function toggleMoodDisabledForChat() {
+        const context = ctx();
+        // Flip the *effective* state, not the raw (possibly-undefined) field —
+        // otherwise the first toggle on a chat relying on the global default
+        // would compute against `undefined` instead of what's actually in effect.
+        context.chatMetadata.chatMoodDisabled = !isMoodDisabledForChat();
+        context.saveMetadataDebounced();
+    }
+
+    // ── Portal — escape SillyTavern's body { position: fixed; overflow: hidden; }
+    // (set in its mobile-styles.css), which breaks position:fixed for any
+    // descendant nested inside body — including anything inside app containers
+    // like #leftSendForm. Mount a dedicated fixed, fullscreen div as a direct
+    // child of <html> instead (same fix SillyTavern-EchoText uses for #et-fab/
+    // its panel — see its "iOS PORTAL" comment) and put the badge/popup/burst
+    // there so they always position correctly relative to the viewport.
+
+    function ensurePortal() {
+        let portal = document.getElementById('cm-portal');
+        if (!portal) {
+            portal = document.createElement('div');
+            portal.id = 'cm-portal';
+            portal.style.cssText = 'position:fixed; top:0; left:0; width:100dvw; height:100dvh; z-index:999997; pointer-events:none;';
+            try {
+                document.documentElement.appendChild(portal);
+            } catch (e) {
+                document.body.appendChild(portal);
+            }
+        }
+        return portal;
+    }
+
+    // ── Prompt injection ────────────────────────────────────────────────────
+
+    function refreshPrompt() {
+        const context = ctx();
+        const text = (hasOpenChat() && !isMoodDisabledForChat()) ? engine.buildEmotionContext() : '';
+        context.setExtensionPrompt(
+            PROMPT_KEY,
+            text,
+            EXTENSION_PROMPT_TYPE_IN_PROMPT,
+            0,
+            false,
+            EXTENSION_PROMPT_ROLE_SYSTEM,
+        );
+    }
+
+    // ── UI: draggable floating badge + click-to-expand breakdown popup ─────
+    // Placing the badge inside existing ST containers (send form, top bar,
+    // etc.) kept running into the position:fixed containing-block bug above,
+    // plus disagreement about where it should live — so instead it's a free-
+    // floating button (like EchoText's #et-fab) the user can drag anywhere,
+    // with its position remembered across reloads.
+
+    const BADGE_POS_KEY = 'chatmood-badge-pos';
+    let badgeDragging = false;
+
+    function loadBadgePosition() {
+        try {
+            const raw = localStorage.getItem(BADGE_POS_KEY);
+            if (!raw) return null;
+            const pos = JSON.parse(raw);
+            if (typeof pos.left === 'number' && typeof pos.top === 'number') return pos;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    function saveBadgePosition(left, top) {
+        try {
+            localStorage.setItem(BADGE_POS_KEY, JSON.stringify({ left, top }));
+        } catch (e) { /* ignore */ }
+    }
+
+    function applyBadgePosition(badgeEl) {
+        const size = 120; // approx outer width (pill w/ label) before layout is known
+        const saved = loadBadgePosition();
+        let left, top;
+        if (saved) {
+            left = Math.max(0, Math.min(window.innerWidth - size, saved.left));
+            top = Math.max(0, Math.min(window.innerHeight - size, saved.top));
+        } else {
+            left = 20;
+            top = window.innerHeight - 110;
+        }
+        badgeEl.style.left = `${left}px`;
+        badgeEl.style.top = `${top}px`;
+    }
+
+    function makeBadgeDraggable(badgeEl) {
+        let isDragging = false;
+        let hasMoved = false;
+        let startX, startY, startLeft, startTop;
+
+        function onStart(clientX, clientY) {
+            isDragging = true;
+            hasMoved = false;
+            const rect = badgeEl.getBoundingClientRect();
+            startX = clientX;
+            startY = clientY;
+            startLeft = rect.left;
+            startTop = rect.top;
+        }
+
+        function onMove(clientX, clientY) {
+            if (!isDragging) return;
+            const dx = clientX - startX;
+            const dy = clientY - startY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasMoved = true;
+            if (!hasMoved) return;
+            badgeDragging = true;
+            badgeEl.classList.add('cm-badge-dragging');
+            const size = badgeEl.offsetWidth;
+            const newLeft = Math.max(0, Math.min(window.innerWidth - size, startLeft + dx));
+            const newTop = Math.max(0, Math.min(window.innerHeight - size, startTop + dy));
+            badgeEl.style.left = `${newLeft}px`;
+            badgeEl.style.top = `${newTop}px`;
+            positionPopup();
+        }
+
+        function onEnd() {
+            if (!isDragging) return;
+            isDragging = false;
+            badgeEl.classList.remove('cm-badge-dragging');
+            if (hasMoved) {
+                const rect = badgeEl.getBoundingClientRect();
+                saveBadgePosition(rect.left, rect.top);
+            }
+            // Swallow the click event that follows a real drag.
+            setTimeout(() => { badgeDragging = false; }, 50);
+        }
+
+        badgeEl.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            onStart(e.clientX, e.clientY);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+            e.preventDefault();
+        });
+        function onMouseMove(e) { onMove(e.clientX, e.clientY); }
+        function onMouseUp() {
+            onEnd();
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        }
+
+        badgeEl.addEventListener('touchstart', (e) => {
+            const t = e.touches[0];
+            onStart(t.clientX, t.clientY);
+        }, { passive: true });
+        badgeEl.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            onMove(t.clientX, t.clientY);
+        }, { passive: false });
+        badgeEl.addEventListener('touchend', () => onEnd());
+    }
+
+    function ensureBadge() {
+        if (jQuery('#cm-badge').length) return;
+        const portal = ensurePortal();
+        const badge = jQuery(`
+            <div id="cm-badge" class="cm-badge" title="${tr('Mood')}">
+                <span class="cm-badge-icon"><i class="fa-solid fa-face-smile"></i></span>
+                <span class="cm-badge-label">${tr('Neutral')}</span>
+            </div>`);
+        badge.on('click', (e) => {
+            e.stopPropagation();
+            if (badgeDragging) return;
+            togglePopup();
+        });
+        badge.addClass('cm-badge-hidden');
+        portal.appendChild(badge[0]);
+        applyBadgePosition(badge[0]);
+        makeBadgeDraggable(badge[0]);
+        // Fade in on first appearance too, not just when reappearing after
+        // the popup closes.
+        requestAnimationFrame(() => badge.removeClass('cm-badge-hidden'));
+    }
+
+    function updateBadge() {
+        if (!hasOpenChat()) {
+            jQuery('#cm-badge').remove();
+            jQuery('#cm-popup').remove();
+            return;
+        }
+
+        ensureBadge();
+        const badge = jQuery('#cm-badge');
+        if (!badge.length) return;
+
+        if (isMoodDisabledForChat()) {
+            badge.css('--badge-color', DISABLED_COLOR);
+            badge.attr('title', tr('Mood disabled for this chat — click to re-enable'));
+            badge.find('.cm-badge-icon i').removeAttr('class').addClass('fa-solid fa-power-off');
+            badge.find('.cm-badge-label').text(tr('Disabled'));
+            return;
+        }
+
+        const state = engine.getEmotionState();
+        const dominant = engine.getDominantEmotion(state);
+        if (!dominant) return;
+        // tr()'d for display only — engine.getIntensityLabel()'s raw English
+        // result is what still goes into the LLM-facing buildEmotionContext().
+        const intensityLabel = tr(engine.getIntensityLabel(dominant, state[dominant.id]));
+        badge.css('--badge-color', dominant.color);
+        badge.attr('title', ctx().t`Mood: ${tr(dominant.label)} (${Math.round(state[dominant.id])}%)`);
+        badge.find('.cm-badge-icon i').removeAttr('class').addClass(dominant.icon);
+        badge.find('.cm-badge-label').text(intensityLabel);
+    }
+
+    function getImpactDisplay(delta) {
+        if (delta > 0.05) return { className: 'cm-emo-delta-up', icon: 'fa-arrow-right', label: `+${Math.abs(delta).toFixed(1)}` };
+        if (delta < -0.05) return { className: 'cm-emo-delta-down', icon: 'fa-arrow-left', label: `-${Math.abs(delta).toFixed(1)}` };
+        return { className: 'cm-emo-delta-neutral', icon: 'fa-minus', label: '0.0' };
+    }
+
+    // Resets whenever the popup closes (see closePopup()) so it never
+    // reopens already in edit mode.
+    let popupEditMode = false;
+
+    function buildPopupHtml() {
+        const disabled = isMoodDisabledForChat();
+        const editing = popupEditMode && !disabled;
+        const state = engine.getEmotionState();
+        const dominant = !disabled && engine.getDominantEmotion(state);
+
+        const rows = engine.PLUTCHIK_EMOTIONS.map(e => {
+            const val = Math.round(state[e.id]);
+            // tr()'d for display only — same note as updateBadge() above.
+            const label = tr(engine.getIntensityLabel(e, val));
+            const isDominant = dominant && dominant.id === e.id;
+            const impact = getImpactDisplay(Number(state.lastImpact?.[e.id] || 0));
+            const color = disabled ? DISABLED_COLOR : e.color;
+            const valueDisplay = editing
+                ? `<input type="number" class="cm-emo-input" data-emotion="${e.id}" min="0" max="100" value="${val}">`
+                : `
+                            <span class="cm-emo-delta ${impact.className}" title="${tr('Last change')}"><i class="fa-solid ${impact.icon}"></i>${impact.label}</span>
+                            <span class="cm-emo-pct">${val}%</span>`;
+            return `
+                <div class="cm-emo-row${isDominant ? ' cm-emo-dominant' : ''}">
+                    <div class="cm-emo-icon" style="color:${color}"><i class="${e.icon}"></i></div>
+                    <div class="cm-emo-info">
+                        <div class="cm-emo-header">
+                            <span class="cm-emo-label">${tr(e.label)}</span>
+                            <span class="cm-emo-intensity">${label}</span>${valueDisplay}
+                        </div>
+                        <div class="cm-emo-bar-track${editing ? ' cm-emo-bar-editable' : ''}" data-emotion="${e.id}">
+                            <div class="cm-emo-bar-fill" style="width:${val}%; background:${color};"></div>
+                            ${editing ? `<div class="cm-emo-bar-thumb" style="left:${val}%;"></div>` : ''}
+                        </div>
+                    </div>
+                </div>`;
+        }).join('');
+
+        const dominantLabel = dominant ? tr(engine.getIntensityLabel(dominant, state[dominant.id])) : tr('Neutral');
+        const dominantName = dominant ? tr(dominant.label) : tr('Neutral');
+        const toggleTitle = disabled ? tr('Enable mood for this chat') : tr('Disable mood for this chat');
+        const editTitle = editing ? tr('Exit edit mode') : tr('Edit mood values');
+
+        return `
+            <div id="cm-popup" class="cm-popup">
+                <div class="cm-popup-header">
+                    <i class="fa-solid fa-heart-pulse"></i>
+                    <span>${tr('Mood')}</span>
+                    ${disabled ? '' : `<button id="cm-popup-edit" class="cm-popup-toggle${editing ? ' cm-popup-toggle-active' : ''}" title="${editTitle}"><i class="fa-solid fa-pen"></i></button>`}
+                    <button id="cm-popup-toggle" class="cm-popup-toggle${disabled ? ' cm-popup-toggle-active' : ''}" title="${toggleTitle}"><i class="fa-solid fa-power-off"></i></button>
+                    <button id="cm-popup-close" class="cm-popup-close"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="cm-popup-dominant" style="color:${disabled ? DISABLED_COLOR : (dominant ? dominant.color : 'inherit')}">
+                    ${disabled ? `<i class="fa-solid fa-power-off"></i> <span>${tr('Disabled')}</span>` : (dominant ? `<i class="${dominant.icon}"></i> <span>${dominantName}</span> <span class="cm-popup-dominant-sub">${dominantLabel} · ${Math.round(state[dominant.id])}%</span>` : `<span>${tr('Neutral')}</span>`)}
+                </div>
+                <div class="cm-popup-rows">${rows}</div>
+            </div>`;
+    }
+
+    const POPUP_POS_KEY = 'chatmood-popup-pos';
+
+    function loadPopupPosition() {
+        try {
+            const raw = localStorage.getItem(POPUP_POS_KEY);
+            if (!raw) return null;
+            const pos = JSON.parse(raw);
+            if (typeof pos.left === 'number' && typeof pos.top === 'number') return pos;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    function savePopupPosition(left, top) {
+        try {
+            localStorage.setItem(POPUP_POS_KEY, JSON.stringify({ left, top }));
+        } catch (e) { /* ignore */ }
+    }
+
+    function positionPopup() {
+        const popup = jQuery('#cm-popup');
+        if (!popup.length) return;
+
+        const popupWidth = popup.outerWidth() || 280;
+        const popupHeight = popup.outerHeight() || 300;
+        const gap = 8;
+
+        const saved = loadPopupPosition();
+        let left, top;
+        if (saved) {
+            // Once moved, the popup remembers its own spot — independent of
+            // wherever the (now-hidden) badge happens to be.
+            left = Math.max(gap, Math.min(saved.left, window.innerWidth - popupWidth - gap));
+            top = Math.max(gap, Math.min(saved.top, window.innerHeight - popupHeight - gap));
+        } else {
+            // First-ever open: appear above the badge, like before.
+            const badgeEl = document.getElementById('cm-badge');
+            const badgeRect = badgeEl ? badgeEl.getBoundingClientRect() : { left: 20, top: window.innerHeight - 100 };
+            left = Math.max(gap, Math.min(badgeRect.left, window.innerWidth - popupWidth - gap));
+            top = Math.max(gap, Math.min(badgeRect.top - popupHeight - gap, window.innerHeight - popupHeight - gap));
+        }
+
+        popup.css({ left: `${left}px`, top: `${top}px`, bottom: 'auto', right: 'auto' });
+    }
+
+    function makePopupDraggable(popupEl) {
+        const handle = popupEl.querySelector('.cm-popup-header');
+        if (!handle) return;
+
+        let isDragging = false;
+        let hasMoved = false;
+        let startX, startY, startLeft, startTop;
+
+        function onStart(clientX, clientY) {
+            isDragging = true;
+            hasMoved = false;
+            const rect = popupEl.getBoundingClientRect();
+            startX = clientX;
+            startY = clientY;
+            startLeft = rect.left;
+            startTop = rect.top;
+        }
+
+        function onMove(clientX, clientY) {
+            if (!isDragging) return;
+            const dx = clientX - startX;
+            const dy = clientY - startY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasMoved = true;
+            if (!hasMoved) return;
+            popupEl.classList.add('cm-popup-dragging');
+            const w = popupEl.offsetWidth;
+            const h = popupEl.offsetHeight;
+            const newLeft = Math.max(0, Math.min(window.innerWidth - w, startLeft + dx));
+            const newTop = Math.max(0, Math.min(window.innerHeight - h, startTop + dy));
+            popupEl.style.left = `${newLeft}px`;
+            popupEl.style.top = `${newTop}px`;
+            popupEl.style.bottom = 'auto';
+            popupEl.style.right = 'auto';
+        }
+
+        function onEnd() {
+            if (!isDragging) return;
+            isDragging = false;
+            popupEl.classList.remove('cm-popup-dragging');
+            if (hasMoved) {
+                const rect = popupEl.getBoundingClientRect();
+                savePopupPosition(rect.left, rect.top);
+            }
+        }
+
+        handle.addEventListener('mousedown', (e) => {
+            if (e.target.closest('.cm-popup-close, .cm-popup-toggle')) return;
+            if (e.button !== 0) return;
+            onStart(e.clientX, e.clientY);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+            e.preventDefault();
+        });
+        function onMouseMove(e) { onMove(e.clientX, e.clientY); }
+        function onMouseUp() {
+            onEnd();
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        }
+
+        handle.addEventListener('touchstart', (e) => {
+            if (e.target.closest('.cm-popup-close, .cm-popup-toggle')) return;
+            const t = e.touches[0];
+            onStart(t.clientX, t.clientY);
+        }, { passive: true });
+        handle.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            onMove(t.clientX, t.clientY);
+        }, { passive: false });
+        handle.addEventListener('touchend', () => onEnd());
+    }
+
+    const POPUP_CLOSE_MS = 150;
+
+    function closePopup() {
+        const popup = jQuery('#cm-popup');
+        if (!popup.length) return;
+        popup.removeClass('cm-popup-open').addClass('cm-popup-closing');
+        setTimeout(() => jQuery('#cm-popup').remove(), POPUP_CLOSE_MS);
+        jQuery('#cm-badge').removeClass('cm-badge-hidden');
+        popupEditMode = false;
+    }
+
+    // Delegated so they survive refreshPopupIfOpen()'s replaceWith (which
+    // swaps in a brand new #cm-popup element every refresh) without needing
+    // to be re-bound each time.
+    jQuery(document).on('click', '#cm-popup-close', (e) => {
+        e.stopPropagation();
+        closePopup();
+    });
+    jQuery(document).on('click', '#cm-popup-toggle', (e) => {
+        e.stopPropagation();
+        toggleMoodDisabledForChat();
+        refreshAll();
+    });
+    jQuery(document).on('click', '#cm-popup-edit', (e) => {
+        e.stopPropagation();
+        popupEditMode = !popupEditMode;
+        refreshPopupIfOpen();
+    });
+    // Applies one edited value in-place (bar fill/thumb, paired number input,
+    // badge) without rebuilding the popup — rebuilding via
+    // refreshPopupIfOpen()'s replaceWith would steal focus out of an active
+    // input, or a mid-drag pointer capture off the bar being dragged.
+    function applyEmotionEdit(emotionId, rawValue, opts = {}) {
+        const value = Math.max(0, Math.min(100, Number(rawValue) || 0));
+        engine.setEmotionValue(emotionId, value);
+        updateBadge();
+
+        const track = document.querySelector(`.cm-emo-bar-track[data-emotion="${emotionId}"]`);
+        const row = track?.closest('.cm-emo-row');
+        if (!row) return value;
+        const fill = row.querySelector('.cm-emo-bar-fill');
+        if (fill) fill.style.width = `${value}%`;
+        const thumb = row.querySelector('.cm-emo-bar-thumb');
+        if (thumb) thumb.style.left = `${value}%`;
+        if (opts.source !== 'input') {
+            const input = row.querySelector('.cm-emo-input');
+            if (input) input.value = Math.round(value);
+        }
+        return value;
+    }
+
+    jQuery(document).on('input', '.cm-emo-input', (e) => {
+        applyEmotionEdit(e.target.dataset.emotion, e.target.value, { source: 'input' });
+    });
+
+    // Draggable bars in edit mode — click/drag anywhere along the track sets
+    // the value proportionally (0 at the left edge, 100 at the right).
+    jQuery(document).on('mousedown', '.cm-emo-bar-editable', (e) => {
+        const track = e.currentTarget;
+        const id = track.dataset.emotion;
+        const setFromClientX = (clientX) => {
+            const rect = track.getBoundingClientRect();
+            applyEmotionEdit(id, ((clientX - rect.left) / rect.width) * 100);
+        };
+        setFromClientX(e.clientX);
+        const onMove = (moveEvent) => setFromClientX(moveEvent.clientX);
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+    });
+    jQuery(document).on('touchstart', '.cm-emo-bar-editable', (e) => {
+        const track = e.currentTarget;
+        const id = track.dataset.emotion;
+        const rect = track.getBoundingClientRect();
+        const t = e.touches[0];
+        applyEmotionEdit(id, ((t.clientX - rect.left) / rect.width) * 100);
+    }, { passive: true });
+    jQuery(document).on('touchmove', '.cm-emo-bar-editable', (e) => {
+        // Touch capturing keeps this bound to the track the gesture started
+        // on, so no document-level fallback listener is needed (unlike mouse).
+        const track = e.currentTarget;
+        const id = track.dataset.emotion;
+        const rect = track.getBoundingClientRect();
+        const t = e.touches[0];
+        applyEmotionEdit(id, ((t.clientX - rect.left) / rect.width) * 100);
+        e.preventDefault();
+    }, { passive: false });
+
+    function togglePopup() {
+        if (jQuery('#cm-popup').length) {
+            closePopup();
+            return;
+        }
+
+        jQuery('#cm-badge').after(buildPopupHtml());
+        positionPopup();
+        requestAnimationFrame(() => jQuery('#cm-popup').addClass('cm-popup-open'));
+        const popupEl = document.getElementById('cm-popup');
+        if (popupEl) makePopupDraggable(popupEl);
+
+        // Echoes EchoText's own FAB/panel relationship: the button hides while
+        // its window is open, and reappears once it's closed. Unlike the
+        // popup's earlier incarnation, clicking outside no longer closes it —
+        // now that it's a movable window, only the × button (or the badge
+        // toggle) should dismiss it.
+        jQuery('#cm-badge').addClass('cm-badge-hidden');
+    }
+
+    function refreshPopupIfOpen() {
+        if (!jQuery('#cm-popup').length) return;
+        jQuery('#cm-popup').replaceWith(buildPopupHtml());
+        // Not a fresh open — skip the fade-in, just keep it visibly open.
+        jQuery('#cm-popup').addClass('cm-popup-open');
+        positionPopup();
+        const popupEl = document.getElementById('cm-popup');
+        if (popupEl) makePopupDraggable(popupEl);
+    }
+
+    // ── Delta burst: brief floating chips above the send form ──────────────
+    // Ported from EchoText's showEmotionDeltaBurst.
+
+    let burstTimer = null;
+
+    function positionBurst() {
+        const sendForm = document.getElementById('send_form');
+        const burst = jQuery('#cm-burst');
+        if (!sendForm || !burst.length) return;
+        const rect = sendForm.getBoundingClientRect();
+        const burstHeight = burst.outerHeight() || 30;
+        burst.css({
+            left: `${rect.left + rect.width / 2}px`,
+            top: `${rect.top - burstHeight - 8}px`,
+            transform: 'translateX(-50%)',
+        });
+    }
+
+    function showEmotionBurst(impactMap) {
+        if (!impactMap || typeof impactMap !== 'object') return;
+
+        // Top 3 emotions by absolute delta, filtering noise.
+        const entries = Object.entries(impactMap)
+            .filter(([, d]) => Math.abs(d) > 0.5)
+            .sort(([, a], [, b]) => Math.abs(b) - Math.abs(a))
+            .slice(0, 3);
+        if (!entries.length) return;
+
+        if (burstTimer) { clearTimeout(burstTimer); burstTimer = null; }
+        jQuery('#cm-burst').remove();
+
+        const chipsHtml = entries.map(([id, delta], i) => {
+            const def = engine.PLUTCHIK_EMOTIONS.find(e => e.id === id);
+            if (!def) return '';
+            const isUp = delta > 0;
+            const arrowClass = isUp ? 'cm-burst-up' : 'cm-burst-down';
+            const arrowIcon = isUp ? 'fa-arrow-right' : 'fa-arrow-left';
+            const sign = isUp ? '+' : '';
+            return `<span class="cm-burst-chip" style="--burst-color:${def.color};animation-delay:${i * 60}ms" title="${tr(def.label)}: ${sign}${delta.toFixed(1)}"><i class="${def.icon}" style="color:${def.color}"></i><i class="fa-solid ${arrowIcon} cm-burst-arrow ${arrowClass}"></i></span>`;
+        }).join('');
+
+        ensurePortal().insertAdjacentHTML('beforeend', `<div id="cm-burst" class="cm-burst">${chipsHtml}</div>`);
+        positionBurst();
+
+        burstTimer = setTimeout(() => {
+            const el = jQuery('#cm-burst');
+            if (el.length) {
+                el.addClass('cm-burst-hiding');
+                setTimeout(() => el.remove(), 480);
+            }
+            burstTimer = null;
+        }, 3200);
+    }
+
+    function refreshAll() {
+        updateBadge();
+        refreshPopupIfOpen();
+        refreshPrompt();
+        updateSettingsPanel();
+    }
+
+    // ── Event wiring ─────────────────────────────────────────────────────────
+    // Mood is driven entirely by engine.processMessageEmotion — EchoText's
+    // original keyword-matching analysis (see lib/emotion-engine.js). LLM-judged
+    // scoring (both a separate quiet-call version and a piggyback-on-the-reply
+    // version) was tried and reverted: neither proved reliable enough on the
+    // user's local reasoning model, so this reverts to the simple, synchronous,
+    // always-available keyword path.
+
+    // Snapshot of the mood state taken right before the user's message is
+    // processed, so the character's reply can report its "last change" delta
+    // against the state as it was at the start of the exchange, instead of
+    // resetting to ~0 the moment the user hits send — see processMessageEmotion
+    // in lib/emotion-engine.js.
+    let turnImpactBaseline = null;
+
+    // ── Extensions settings drawer entry ────────────────────────────────────
+    // Built-in extensions (regex, caption, ...) fill a pre-reserved
+    // "..._container" div hardcoded into public/index.html — that's not
+    // available to a third-party extension. Instead, append our own block
+    // directly into #extensions_settings2 using the same generic
+    // .inline-drawer markup every built-in settings block uses; the
+    // collapse/expand behavior is already wired globally in script.js
+    // (delegated click handler on .inline-drawer-toggle), no extra JS needed
+    // for that part.
+    function renderSettingsPanel() {
+        if (document.getElementById('chatmood_container')) return;
+        const container = jQuery('#extensions_settings2');
+        if (!container.length) return;
+
+        const userWeight = getMessageWeight(true);
+        const charWeight = getMessageWeight(false);
+
+        const html = jQuery(`
+            <div id="chatmood_container" class="extension_container">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>ChatMood</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <label class="checkbox_label" for="chatmood_enabled_by_default">
+                            <input type="checkbox" id="chatmood_enabled_by_default"${getEnabledByDefault() ? ' checked' : ''}>
+                            ${tr('Enabled by default')}
+                        </label>
+                        <label for="chatmood_keyword_language">${tr('Keyword matching language')}</label>
+                        <select id="chatmood_keyword_language">
+                            <option value="en"${getKeywordLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
+                            <option value="de"${getKeywordLanguage() === 'de' ? ' selected' : ''}>${tr('German')}</option>
+                        </select>
+                        <small>${tr('Which language the mood-scoring keyword list is matched against. Requires reloading SillyTavern to take effect.')}</small>
+                        <label for="chatmood_user_weight">
+                            ${tr('User message influence')}: <span id="chatmood_user_weight_val">${userWeight.toFixed(1)}</span>
+                        </label>
+                        <input type="range" id="chatmood_user_weight" min="0" max="2" step="0.1" value="${userWeight}">
+                        <label for="chatmood_char_weight">
+                            ${tr('Character reply influence')}: <span id="chatmood_char_weight_val">${charWeight.toFixed(1)}</span>
+                        </label>
+                        <input type="range" id="chatmood_char_weight" min="0" max="2" step="0.1" value="${charWeight}">
+                        <small>${tr('How strongly each side of the exchange moves the mood needle. 0 ignores it entirely; 1 is normal; higher amplifies it.')}</small>
+                        <button id="chatmood_reset_chat" class="menu_button" type="button">${tr('Reset mood to baseline (current chat)')}</button>
+                    </div>
+                </div>
+            </div>`);
+
+        container.append(html);
+
+        jQuery('#chatmood_enabled_by_default').on('change', (e) => {
+            setEnabledByDefault(e.target.checked);
+            // The current chat's badge/rows may themselves be relying on
+            // this default (no explicit per-chat override yet).
+            refreshAll();
+        });
+
+        jQuery('#chatmood_keyword_language').on('change', async (e) => {
+            setKeywordLanguage(e.target.value);
+            // Keyword dictionary is loaded once when the engine is created
+            // (module init) — nothing short of a reload picks up the change.
+            const context = ctx();
+            const confirmed = await context.callGenericPopup(
+                tr('ChatMood needs to reload SillyTavern for the new keyword language to take effect. Reload now?'),
+                context.POPUP_TYPE.CONFIRM,
+            );
+            if (confirmed === context.POPUP_RESULT.AFFIRMATIVE) location.reload();
+        });
+
+        jQuery('#chatmood_user_weight').on('input', (e) => {
+            const value = Number(e.target.value);
+            jQuery('#chatmood_user_weight_val').text(value.toFixed(1));
+            setMessageWeight(true, value);
+        });
+        jQuery('#chatmood_char_weight').on('input', (e) => {
+            const value = Number(e.target.value);
+            jQuery('#chatmood_char_weight_val').text(value.toFixed(1));
+            setMessageWeight(false, value);
+        });
+
+        jQuery('#chatmood_reset_chat').on('click', async () => {
+            if (!hasOpenChat()) return;
+            const context = ctx();
+            const confirmed = await context.callGenericPopup(
+                tr('Reset this chat\'s mood back to its starting baseline? This cannot be undone.'),
+                context.POPUP_TYPE.CONFIRM,
+            );
+            if (confirmed !== context.POPUP_RESULT.AFFIRMATIVE) return;
+            // Re-check — the chat could have changed/closed while the confirm was open.
+            if (!hasOpenChat()) return;
+            engine.clearEmotionState();
+            refreshAll();
+        });
+
+        updateSettingsPanel();
+    }
+
+    // Keeps the reset button's enabled/disabled state in sync with whether a
+    // chat is actually open — the settings panel itself is only built once,
+    // but which chat (if any) is active changes constantly.
+    function updateSettingsPanel() {
+        const resetButton = document.getElementById('chatmood_reset_chat');
+        if (resetButton) resetButton.disabled = !hasOpenChat();
+    }
+
+    function init() {
+        const context = ctx();
+        const { eventSource, event_types } = context;
+
+        renderSettingsPanel();
+
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            turnImpactBaseline = null;
+            refreshAll();
+        });
+
+        eventSource.on(event_types.USER_MESSAGE_RENDERED, (mesId) => {
+            if (!hasOpenChat() || isMoodDisabledForChat()) return;
+            const msg = ctx().chat?.[mesId];
+            if (!msg) return;
+            turnImpactBaseline = { ...engine.getEmotionState() };
+            engine.processMessageEmotion(msg.mes, true, { updateImpact: false, weight: getMessageWeight(true) });
+            refreshAll();
+        });
+
+        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (mesId) => {
+            if (!hasOpenChat() || isMoodDisabledForChat()) return;
+            const msg = ctx().chat?.[mesId];
+            if (!msg) return;
+            const state = engine.processMessageEmotion(msg.mes, false, { impactBaseline: turnImpactBaseline || undefined, weight: getMessageWeight(false) });
+            showEmotionBurst(state.lastImpact);
+            turnImpactBaseline = null;
+            refreshAll();
+        });
+
+        refreshAll();
+        console.log('[ChatMood] Initialized.');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();

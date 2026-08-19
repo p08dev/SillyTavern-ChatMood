@@ -1,0 +1,15 @@
+{
+    "display_name": "ChatMood",
+    "loading_order": 1002,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Patrick D. Rupp",
+    "version": "1.0.0",
+    "homePage": "",
+    "auto_update": false,
+    "i18n": {
+        "de-de": "i18n/de-de.json"
+    }
+}
