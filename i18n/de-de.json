@@ -4,6 +4,8 @@
     "Disabled": "Deaktiviert",
     "Mood disabled for this chat — click to re-enable": "Stimmung für diesen Chat deaktiviert — zum Reaktivieren klicken",
     "Mood: ${0} (${1}%)": "Stimmung: ${0} (${1}%)",
+    "muted": "stummgeschaltet",
+    "Reset ${0}'s mood to baseline": "${0}s Stimmung auf Ausgangswert zurücksetzen",
     "Enable mood for this chat": "Stimmung für diesen Chat aktivieren",
     "Disable mood for this chat": "Stimmung für diesen Chat deaktivieren",
     "Last change": "Letzte Änderung",

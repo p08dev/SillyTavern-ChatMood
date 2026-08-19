@@ -69,19 +69,101 @@
     const PROMPT_KEY = 'ChatMood';
     const DISABLED_COLOR = '#888888';
 
+    // ── Group chat support ───────────────────────────────────────────────────
+    // Members are identified by avatar filename (ST's own convention —
+    // mes.original_avatar, group.members — since display names aren't
+    // guaranteed unique). State per member lives under a *new*
+    // chat_metadata.chatMoodGroup key, keeping the existing single-character
+    // chat_metadata.chatMood path (and its data) completely untouched for 1:1
+    // chats.
+    //
+    // currentProcessingKey lets the three places that must target one
+    // specific member explicitly (processMessageEmotion for a broadcast user
+    // message or a single character's own reply; buildEmotionContext for a
+    // specific member's prompt block) override which member api.getState()/
+    // saveState()/getCurrentCharacter() resolve to. Everywhere else (badge,
+    // popup, reset button) falls through to getActiveGroupMemberAvatar() —
+    // "whichever member the UI is currently showing".
+    let currentProcessingKey = null;
+    function withGroupMember(avatar, fn) {
+        const prev = currentProcessingKey;
+        currentProcessingKey = avatar;
+        try {
+            return fn();
+        } finally {
+            currentProcessingKey = prev;
+        }
+    }
+
+    function getCurrentGroup() {
+        const context = ctx();
+        if (!context.groupId) return null;
+        return context.groups?.find(g => g.id === context.groupId) || null;
+    }
+
+    function getGroupMembers() {
+        return getCurrentGroup()?.members || [];
+    }
+
+    function getActiveGroupMembers() {
+        const group = getCurrentGroup();
+        if (!group) return [];
+        const disabled = new Set(group.disabled_members || []);
+        return (group.members || []).filter(avatar => !disabled.has(avatar));
+    }
+
+    function getLastSpeakingMember() {
+        const chat = ctx().chat || [];
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i]?.original_avatar) return chat[i].original_avatar;
+        }
+        return null;
+    }
+
+    // Ephemeral (not persisted) — the member the popup switcher is currently
+    // pinned to, if any. Reset on chat change.
+    let selectedGroupMember = null;
+
+    // "Whose mood is the UI currently showing" — the popup switcher's choice
+    // if still valid, else whoever spoke most recently, else the first active
+    // member, else null (empty/fully-muted group — badge/popup hide).
+    function getActiveGroupMemberAvatar() {
+        const members = getGroupMembers();
+        if (selectedGroupMember && members.includes(selectedGroupMember)) return selectedGroupMember;
+        const last = getLastSpeakingMember();
+        if (last && members.includes(last)) return last;
+        return getActiveGroupMembers()[0] || members[0] || null;
+    }
+
+    function getGroupMemberCharacter(avatar) {
+        if (!avatar) return null;
+        return ctx().characters?.find(c => c.avatar === avatar) || null;
+    }
+
     const api = {
         baseUrl: BASE_URL,
         getState() {
-            return ctx().chatMetadata?.chatMood || null;
+            const context = ctx();
+            if (!context.groupId) return context.chatMetadata?.chatMood || null;
+            const key = currentProcessingKey || getActiveGroupMemberAvatar();
+            return key ? (context.chatMetadata?.chatMoodGroup?.[key] || null) : null;
         },
         saveState(state) {
             const context = ctx();
-            context.chatMetadata.chatMood = state;
+            if (!context.groupId) {
+                context.chatMetadata.chatMood = state;
+            } else {
+                const key = currentProcessingKey || getActiveGroupMemberAvatar();
+                if (!key) return;
+                if (!context.chatMetadata.chatMoodGroup) context.chatMetadata.chatMoodGroup = {};
+                context.chatMetadata.chatMoodGroup[key] = state;
+            }
             context.saveMetadataDebounced();
         },
         getCurrentCharacter() {
             const context = ctx();
-            return context.characters?.[context.characterId] || null;
+            if (!context.groupId) return context.characters?.[context.characterId] || null;
+            return getGroupMemberCharacter(currentProcessingKey || getActiveGroupMemberAvatar());
         },
         getChatHistory() {
             return ctx().chat || [];
@@ -100,11 +182,7 @@
     const engine = window.ChatMoodEmotionEngine.createEmotionEngine(api);
 
     function hasOpenChat() {
-        // Group chats aren't supported yet — a single per-chat mood would
-        // blend every member's messages into one number, which reads as
-        // wrong once more than one character is involved. Disabled outright
-        // until per-character tracking is built.
-        return !!ctx().getCurrentChatId() && !ctx().groupId;
+        return !!ctx().getCurrentChatId();
     }
 
     // ── Global default + per-chat disable toggle ────────────────────────────
@@ -119,11 +197,12 @@
 
     // ── Static position mode ─────────────────────────────────────────────────
     // Pins the badge + popup above the chat box (#send_form) instead of the
-    // free-floating draggable position. Default (opt-out, not opt-in): it
-    // can't end up off-screen, unlike a saved drag position, so it's the
-    // safer default — users who want to drag it around can turn this off.
+    // free-floating draggable position. Off by default — the badge/popup
+    // clamp against their real measured size now (see applyDraggableBadgePosition),
+    // so they can't end up off-screen; this is an opt-in alternative for
+    // anyone who'd rather not deal with dragging at all.
     function isStaticPositionEnabled() {
-        return ctx().extensionSettings.ChatMood?.staticPosition !== false;
+        return !!ctx().extensionSettings.ChatMood?.staticPosition;
     }
 
     function setStaticPositionEnabled(value) {
@@ -252,17 +331,68 @@
 
     // ── Prompt injection ────────────────────────────────────────────────────
 
-    function refreshPrompt() {
-        const context = ctx();
-        const text = (hasOpenChat() && !isMoodDisabledForChat()) ? engine.buildEmotionContext() : '';
-        context.setExtensionPrompt(
-            PROMPT_KEY,
+    function setPromptKey(key, text) {
+        ctx().setExtensionPrompt(
+            key,
             text,
             EXTENSION_PROMPT_TYPE_IN_PROMPT,
             0,
             false,
             EXTENSION_PROMPT_ROLE_SYSTEM,
         );
+    }
+
+    function groupPromptKey(avatar) {
+        return `${PROMPT_KEY}_${avatar}`;
+    }
+
+    // Keys set by the previous group-mode refreshPrompt() call — needed to
+    // explicitly clear a departed/muted member's block. extension_prompts
+    // entries are never auto-cleared, so a stale key would otherwise linger
+    // in the injected prompt forever.
+    let lastGroupPromptKeys = [];
+
+    function clearGroupPromptKeys() {
+        for (const key of lastGroupPromptKeys) setPromptKey(key, '');
+        lastGroupPromptKeys = [];
+    }
+
+    function refreshPrompt() {
+        const context = ctx();
+        const active = hasOpenChat() && !isMoodDisabledForChat();
+
+        if (!active || !context.groupId) {
+            clearGroupPromptKeys();
+        }
+
+        if (!active) {
+            setPromptKey(PROMPT_KEY, '');
+            return;
+        }
+
+        if (!context.groupId) {
+            setPromptKey(PROMPT_KEY, engine.buildEmotionContext());
+            return;
+        }
+
+        // Group chat: one labeled block per active member, own key each so
+        // they don't overwrite each other (setExtensionPrompt joins every
+        // key's value together at generation time).
+        setPromptKey(PROMPT_KEY, '');
+        const newKeys = [];
+        for (const avatar of getActiveGroupMembers()) {
+            const block = withGroupMember(avatar, () => engine.buildEmotionContext());
+            if (!block) continue;
+            const name = getGroupMemberCharacter(avatar)?.name || avatar;
+            const labeled = block.replace('<emotional_state>', `<emotional_state character="${name}">`);
+            const key = groupPromptKey(avatar);
+            setPromptKey(key, labeled);
+            newKeys.push(key);
+        }
+        for (const oldKey of lastGroupPromptKeys) {
+            if (!newKeys.includes(oldKey)) setPromptKey(oldKey, '');
+        }
+        lastGroupPromptKeys = newKeys;
     }
 
     // ── UI: draggable floating badge + click-to-expand breakdown popup ─────
@@ -418,8 +548,17 @@
         requestAnimationFrame(() => badge.removeClass('cm-badge-hidden'));
     }
 
+    // In a group chat, prefix the given title text with the active member's
+    // name so it's never ambiguous whose mood the badge/popup is showing.
+    function withMemberNamePrefix(text) {
+        if (!ctx().groupId) return text;
+        const name = getGroupMemberCharacter(getActiveGroupMemberAvatar())?.name;
+        return name ? `${name} — ${text}` : text;
+    }
+
     function updateBadge() {
-        if (!hasOpenChat()) {
+        // Empty/fully-muted group: nothing to show, same as no chat open.
+        if (!hasOpenChat() || (ctx().groupId && !getActiveGroupMemberAvatar())) {
             jQuery('#cm-badge').remove();
             jQuery('#cm-popup').remove();
             return;
@@ -431,7 +570,7 @@
 
         if (isMoodDisabledForChat()) {
             badge.css('--badge-color', DISABLED_COLOR);
-            badge.attr('title', tr('Mood disabled for this chat — click to re-enable'));
+            badge.attr('title', withMemberNamePrefix(tr('Mood disabled for this chat — click to re-enable')));
             badge.find('.cm-badge-icon i').removeAttr('class').addClass('fa-solid fa-power-off');
             badge.find('.cm-badge-label').text(tr('Disabled'));
             return;
@@ -444,7 +583,7 @@
         // result is what still goes into the LLM-facing buildEmotionContext().
         const intensityLabel = tr(engine.getIntensityLabel(dominant, state[dominant.id]));
         badge.css('--badge-color', dominant.color);
-        badge.attr('title', ctx().t`Mood: ${tr(dominant.label)} (${Math.round(state[dominant.id])}%)`);
+        badge.attr('title', withMemberNamePrefix(ctx().t`Mood: ${tr(dominant.label)} (${Math.round(state[dominant.id])}%)`));
         badge.find('.cm-badge-icon i').removeAttr('class').addClass(dominant.icon);
         badge.find('.cm-badge-label').text(intensityLabel);
     }
@@ -498,6 +637,19 @@
         const toggleTitle = disabled ? tr('Enable mood for this chat') : tr('Disable mood for this chat');
         const editTitle = editing ? tr('Exit edit mode') : tr('Edit mood values');
 
+        const groupId = ctx().groupId;
+        const activeAvatar = groupId ? getActiveGroupMemberAvatar() : null;
+        const group = groupId ? getCurrentGroup() : null;
+        const memberSwitcherHtml = groupId ? `
+                <select id="cm-popup-member-select" class="text_pole">
+                    ${getGroupMembers().map(avatar => {
+                        const name = getGroupMemberCharacter(avatar)?.name || avatar;
+                        const muted = group?.disabled_members?.includes(avatar);
+                        const label = muted ? `${name} (${tr('muted')})` : name;
+                        return `<option value="${avatar}"${avatar === activeAvatar ? ' selected' : ''}>${label}</option>`;
+                    }).join('')}
+                </select>` : '';
+
         return `
             <div id="cm-popup" class="cm-popup${isStaticPositionEnabled() ? ' cm-popup-static' : ''}">
                 <div class="cm-popup-header">
@@ -507,6 +659,7 @@
                     <button id="cm-popup-toggle" class="cm-popup-toggle${disabled ? ' cm-popup-toggle-active' : ''}" title="${toggleTitle}"><i class="fa-solid fa-power-off"></i></button>
                     <button id="cm-popup-close" class="cm-popup-close"><i class="fa-solid fa-xmark"></i></button>
                 </div>
+                ${memberSwitcherHtml}
                 <div class="cm-popup-dominant" style="color:${disabled ? DISABLED_COLOR : (dominant ? dominant.color : 'inherit')}">
                     ${disabled ? `<i class="fa-solid fa-power-off"></i> <span>${tr('Disabled')}</span>` : (dominant ? `<i class="${dominant.icon}"></i> <span>${dominantName}</span> <span class="cm-popup-dominant-sub">${dominantLabel} · ${Math.round(state[dominant.id])}%</span>` : `<span>${tr('Neutral')}</span>`)}
                 </div>
@@ -679,6 +832,11 @@
         e.stopPropagation();
         popupEditMode = !popupEditMode;
         refreshPopupIfOpen();
+    });
+    jQuery(document).on('change', '#cm-popup-member-select', (e) => {
+        selectedGroupMember = e.target.value;
+        popupEditMode = false;
+        refreshAll();
     });
     // Applies one edited value in-place (bar fill/thumb, paired number input,
     // badge) without rebuilding the popup — rebuilding via
@@ -853,6 +1011,9 @@
     // resetting to ~0 the moment the user hits send — see processMessageEmotion
     // in lib/emotion-engine.js.
     let turnImpactBaseline = null;
+    // Same idea, per group member (keyed by avatar) — see the group-chat
+    // USER_MESSAGE_RENDERED/CHARACTER_MESSAGE_RENDERED handlers in init().
+    let turnImpactBaselineByMember = {};
 
     // ── Extensions settings drawer entry ────────────────────────────────────
     // Built-in extensions (regex, caption, ...) fill a pre-reserved
@@ -974,15 +1135,15 @@
         });
 
         jQuery('#chatmood_reset_chat').on('click', async () => {
-            if (!hasOpenChat()) return;
+            if (!canResetMood()) return;
             const context = ctx();
             const confirmed = await context.callGenericPopup(
                 tr('Reset this chat\'s mood back to its starting baseline? This cannot be undone.'),
                 context.POPUP_TYPE.CONFIRM,
             );
             if (confirmed !== context.POPUP_RESULT.AFFIRMATIVE) return;
-            // Re-check — the chat could have changed/closed while the confirm was open.
-            if (!hasOpenChat()) return;
+            // Re-check — the chat/selection could have changed while the confirm was open.
+            if (!canResetMood()) return;
             engine.clearEmotionState();
             refreshAll();
         });
@@ -990,12 +1151,25 @@
         updateSettingsPanel();
     }
 
-    // Keeps the reset button's enabled/disabled state in sync with whether a
-    // chat is actually open — the settings panel itself is only built once,
-    // but which chat (if any) is active changes constantly.
+    // In a group chat, resetting only ever touches whichever member the
+    // popup switcher currently has selected (same member api.getState()/
+    // saveState() would resolve to) — never every member at once.
+    function canResetMood() {
+        return hasOpenChat() && !(ctx().groupId && !getActiveGroupMemberAvatar());
+    }
+
+    // Keeps the reset button's enabled/disabled state and label in sync with
+    // whether a chat is actually open (and, in a group chat, which member is
+    // currently selected) — the settings panel itself is only built once,
+    // but which chat/member is active changes constantly.
     function updateSettingsPanel() {
         const resetButton = document.getElementById('chatmood_reset_chat');
-        if (resetButton) resetButton.disabled = !hasOpenChat();
+        if (!resetButton) return;
+        resetButton.disabled = !canResetMood();
+        const memberName = ctx().groupId ? getGroupMemberCharacter(getActiveGroupMemberAvatar())?.name : null;
+        resetButton.textContent = memberName
+            ? ctx().t`Reset ${memberName}'s mood to baseline`
+            : tr('Reset mood to baseline (current chat)');
     }
 
     function init() {
@@ -1016,6 +1190,8 @@
 
         eventSource.on(event_types.CHAT_CHANGED, () => {
             turnImpactBaseline = null;
+            turnImpactBaselineByMember = {};
+            selectedGroupMember = null;
             refreshAll();
         });
 
@@ -1023,8 +1199,29 @@
             if (!hasOpenChat() || isMoodDisabledForChat()) return;
             const msg = ctx().chat?.[mesId];
             if (!msg) return;
-            turnImpactBaseline = { ...engine.getEmotionState() };
-            engine.processMessageEmotion(msg.mes, true, { updateImpact: false, weight: getMessageWeight(true) });
+
+            if (ctx().groupId) {
+                // Broadcast: the user's message is the shared stimulus every
+                // active (non-muted) member just heard. Unlike the 1:1 branch
+                // below, this does NOT suppress the impact update (no
+                // updateImpact: false) — a member might go several turns
+                // without replying, so their popup row needs to reflect what
+                // this message just did to them rather than sit on a stale
+                // delta from whenever they last spoke. The baseline captured
+                // here (their state right before the broadcast) is reused if
+                // they go on to reply this turn (see below), correctly
+                // extending their delta to cover the full exchange instead of
+                // just the broadcast's share of it.
+                for (const avatar of getActiveGroupMembers()) {
+                    withGroupMember(avatar, () => {
+                        turnImpactBaselineByMember[avatar] = { ...engine.getEmotionState() };
+                        engine.processMessageEmotion(msg.mes, true, { weight: getMessageWeight(true) });
+                    });
+                }
+            } else {
+                turnImpactBaseline = { ...engine.getEmotionState() };
+                engine.processMessageEmotion(msg.mes, true, { updateImpact: false, weight: getMessageWeight(true) });
+            }
             refreshAll();
         });
 
@@ -1032,9 +1229,30 @@
             if (!hasOpenChat() || isMoodDisabledForChat()) return;
             const msg = ctx().chat?.[mesId];
             if (!msg) return;
-            const state = engine.processMessageEmotion(msg.mes, false, { impactBaseline: turnImpactBaseline || undefined, weight: getMessageWeight(false) });
-            showEmotionBurst(state.lastImpact);
-            turnImpactBaseline = null;
+
+            if (ctx().groupId) {
+                // original_avatar is the only thing that decides whose state
+                // this touches — a character's reply must never move another
+                // member's mood.
+                const avatar = msg.original_avatar;
+                if (!avatar) return; // narrator/system message — not attributable to a member
+                withGroupMember(avatar, () => {
+                    const state = engine.processMessageEmotion(msg.mes, false, { impactBaseline: turnImpactBaselineByMember[avatar], weight: getMessageWeight(false) });
+                    showEmotionBurst(state.lastImpact);
+                });
+                // A manual switcher pick (selectedGroupMember) should only
+                // last until someone actually speaks next — otherwise the
+                // badge/popup stay stuck on whoever you last picked forever,
+                // even though every member's own mood keeps updating
+                // correctly underneath. Whoever just replied becomes the new
+                // "whoever spoke last" anyway, so this is a no-op display-
+                // wise unless a *different* member was pinned.
+                selectedGroupMember = null;
+            } else {
+                const state = engine.processMessageEmotion(msg.mes, false, { impactBaseline: turnImpactBaseline || undefined, weight: getMessageWeight(false) });
+                showEmotionBurst(state.lastImpact);
+                turnImpactBaseline = null;
+            }
             refreshAll();
         });
 

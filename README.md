@@ -9,9 +9,11 @@ prompt, so their tone shifts with how the conversation has actually gone.
 - 9-axis Plutchik mood (love, joy, trust, fear, surprise, sadness, disgust,
   anger, anticipation), stored per chat — a new chat with the same character
   starts fresh.
-- Floating badge showing the dominant emotion; click for a breakdown
-  popup. By default both are pinned in a static spot above the chat box;
-  optionally switch to a draggable, freely-positioned badge/popup instead.
+- Group chat support — each member's mood is tracked independently (see
+  below).
+- Draggable floating badge showing the dominant emotion; click for a
+  breakdown popup (also draggable). Optionally switch to a static badge/
+  popup pinned above the chat box instead.
 - Delta burst animation showing what just changed, above the message input.
 - Edit mode — drag the bars or type exact values to set mood by hand.
 - Per-chat enable/disable toggle, plus a global default for new chats.
@@ -43,6 +45,28 @@ There's no time-based decay — mood only changes when a message is actually
 processed, not by real-world time passing between messages (the main chat is
 a story, not a texting thread where silence itself carries meaning).
 
+## Group chats
+
+Each member gets their own independently-tracked mood, seeded from their
+own character card. A few rules specific to groups:
+
+- A user message is the shared stimulus every active (non-muted) member
+  just heard, so it nudges **all** of their moods.
+- A character's own reply only ever updates **that character's own**
+  mood — never another member's.
+- Muted members keep their tracked mood (still viewable/resettable via the
+  popup) but stop receiving the user-message broadcast and drop out of the
+  injected prompt while muted.
+- The floating badge/popup show whoever spoke most recently by default;
+  use the dropdown at the top of the popup to view or edit any other
+  member instead. Edit mode and "reset to baseline" only ever act on
+  whichever member is currently selected there.
+- The prompt gets one labeled `<emotional_state character="Name">` block
+  per active member, every turn — token cost scales with group size, so
+  "Token saver mode" (below) is worth turning on for larger groups.
+- No `@mention` targeting — a user message can't be aimed at one specific
+  member; it always reaches everyone active.
+
 ## What gets added to the prompt
 
 Each turn, ChatMood injects a block into the system prompt (via
@@ -72,13 +96,13 @@ Express this through tone, phrasing, and energy — do not name or announce emot
 ## Settings
 
 SillyTavern → Extensions panel → **ChatMood**: enable-by-default toggle,
-token saver mode, static position (on by default — pins the badge/popup
-above the chat box instead of letting you drag them, so they can never end
-up positioned off-screen), keyword-matching language (English/German,
-requires a reload), personality inference language (English/German/both,
-for MBTI + archetype detection from the character card — no reload
-needed), message-weighting sliders, and a reset-to-baseline button for the
-chat you're currently in.
+token saver mode, static position (off by default — pins the badge/popup
+above the chat box instead of letting you drag them around), keyword-
+matching language (English/German, requires a reload), personality
+inference language (English/German/both, for MBTI + archetype detection
+from the character card — no reload needed), message-weighting sliders,
+and a reset-to-baseline button for the chat (or, in a group chat, member)
+you're currently viewing.
 
 ## Installation
 
