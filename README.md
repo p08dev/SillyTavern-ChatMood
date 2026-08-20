@@ -14,7 +14,9 @@ prompt, so their tone shifts with how the conversation has actually gone.
 - Draggable floating badge showing the dominant emotion; click for a
   breakdown popup (also draggable). Optionally switch to a static badge/
   popup pinned above the chat box instead.
-- Delta burst animation showing what just changed, above the message input.
+- Delta burst animation showing what just changed, above the message input
+  — fires for your own message as well as the character's reply, not just
+  the reply.
 - Edit mode — drag the bars or type exact values to set mood by hand.
 - Per-chat enable/disable toggle, plus a global default for new chats.
 - Configurable weighting for how much the user's message vs. the
@@ -28,6 +30,11 @@ prompt, so their tone shifts with how the conversation has actually gone.
   language, since a character card's language doesn't have to match it.
 - Token saver mode — drops the temperament line from the injected prompt,
   the single most expensive part of it.
+- Mood gently regresses toward the character's own drifted baseline every
+  exchange, and a single message can't swing a value past a fixed cap, so
+  values can't get permanently stuck at 0%/100% the way they could early
+  on. Optionally (off by default) also drifts back over real elapsed days
+  between messages.
 - i18n (German) for the UI — the LLM prompt itself always stays in English
   regardless of UI language (see below).
 
@@ -41,9 +48,22 @@ message — it's the more direct signal of the character's felt reaction, the
 user's message is the stimulus that provoked it. Both weights are
 configurable in the settings panel.
 
-There's no time-based decay — mood only changes when a message is actually
-processed, not by real-world time passing between messages (the main chat is
-a story, not a texting thread where silence itself carries meaning).
+A single message can't move an axis by more than a fixed cap, no matter
+how many keyword hits, ALL CAPS, or `!!!` stack up — so one exceptionally
+loaded message can't slam a value straight to the ceiling by itself.
+Opposite-emotion pairs (e.g. Love/Disgust, Joy/Sadness) also share a
+combined budget, so one side maxing out squeezes the other down rather
+than both running free. On top of that, every exchange (a message and its
+reply) gently nudges each axis back toward the character's own personal
+baseline — subtly, so it doesn't erase a real emotional beat, just keeps
+things from settling permanently at an extreme. Optionally (off by
+default, enable in settings) mood also drifts back toward baseline as
+real days pass between messages — love lingers (multi-day half-life),
+fear/anger fade within about a day — for chats with long gaps between
+sessions. Together these keep mood from getting stuck pinned at 0% or
+100% forever once nothing is actively reinforcing it, while a genuinely
+long, deep relationship still gets to keep an elevated resting point
+rather than snapping back to a generic neutral.
 
 ## Group chats
 
@@ -97,11 +117,14 @@ Express this through tone, phrasing, and energy — do not name or announce emot
 
 SillyTavern → Extensions panel → **ChatMood**: enable-by-default toggle,
 token saver mode, static position (off by default — pins the badge/popup
-above the chat box instead of letting you drag them around), keyword-
-matching language (English/German, requires a reload), personality
-inference language (English/German/both, for MBTI + archetype detection
-from the character card — no reload needed), message-weighting sliders,
-and a reset-to-baseline button for the chat (or, in a group chat, member)
+above the chat box instead of letting you drag them around), time-based
+mood decay (off by default — turn on for mood to also drift back toward
+baseline as real days pass between messages, on top of the small
+per-exchange drift that already happens either way), keyword-matching
+language (English/German, requires a reload), personality inference
+language (English/German/both, for MBTI + archetype detection from the
+character card — no reload needed), message-weighting sliders, and a
+reset-to-baseline button for the chat (or, in a group chat, member)
 you're currently viewing.
 
 ## Installation

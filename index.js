@@ -177,6 +177,9 @@
         getTokenSaverMode() {
             return getTokenSaverMode();
         },
+        getTimeDecayEnabled() {
+            return getTimeDecayEnabled();
+        },
     };
 
     const engine = window.ChatMoodEmotionEngine.createEmotionEngine(api);
@@ -266,6 +269,25 @@
         const context = ctx();
         if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
         context.extensionSettings.ChatMood.tokenSaverMode = !!value;
+        context.saveSettingsDebounced();
+    }
+
+    // ── Time-based mood decay ────────────────────────────────────────────────
+    // Read live by engine.processMessageEmotion() via api.getTimeDecayEnabled(),
+    // so this takes effect on the very next message — no reload needed.
+    // Default off: the always-on per-message regression (see
+    // lib/emotion-engine.js's header comment) already prevents mood from
+    // sticking at 0/100 forever; this adds real-time drift on top for anyone
+    // who wants it, opt-in rather than opt-out.
+    function getTimeDecayEnabled() {
+        const v = ctx().extensionSettings.ChatMood?.timeDecayEnabled;
+        return v === undefined ? false : !!v;
+    }
+
+    function setTimeDecayEnabled(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.timeDecayEnabled = !!value;
         context.saveSettingsDebounced();
     }
 
@@ -1054,6 +1076,11 @@
                             ${tr('Static position (above chat box)')}
                         </label>
                         <small>${tr('Pins the mood button and popup in a fixed spot above the chat box instead of letting you drag them around.')}</small>
+                        <label class="checkbox_label" for="chatmood_time_decay">
+                            <input type="checkbox" id="chatmood_time_decay"${getTimeDecayEnabled() ? ' checked' : ''}>
+                            ${tr('Time-based mood decay')}
+                        </label>
+                        <small>${tr('Off by default. Lets mood also drift back toward baseline as real days pass between messages (love lingers, fear/anger fade faster), on top of the small per-exchange drift that already happens either way.')}</small>
                         <label for="chatmood_keyword_language">${tr('Keyword matching language')}</label>
                         <select id="chatmood_keyword_language">
                             <option value="en"${getKeywordLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
@@ -1104,6 +1131,11 @@
             // already rebuilds the popup unconditionally, so it needs no
             // equivalent nudge here.
             jQuery('#cm-badge').remove();
+            refreshAll();
+        });
+
+        jQuery('#chatmood_time_decay').on('change', (e) => {
+            setTimeDecayEnabled(e.target.checked);
             refreshAll();
         });
 
@@ -1202,16 +1234,14 @@
 
             if (ctx().groupId) {
                 // Broadcast: the user's message is the shared stimulus every
-                // active (non-muted) member just heard. Unlike the 1:1 branch
-                // below, this does NOT suppress the impact update (no
-                // updateImpact: false) — a member might go several turns
-                // without replying, so their popup row needs to reflect what
-                // this message just did to them rather than sit on a stale
-                // delta from whenever they last spoke. The baseline captured
-                // here (their state right before the broadcast) is reused if
-                // they go on to reply this turn (see below), correctly
-                // extending their delta to cover the full exchange instead of
-                // just the broadcast's share of it.
+                // active (non-muted) member just heard — a member might go
+                // several turns without replying, so their popup row needs to
+                // reflect what this message just did to them rather than sit
+                // on a stale delta from whenever they last spoke. The baseline
+                // captured here (their state right before the broadcast) is
+                // reused if they go on to reply this turn (see below),
+                // correctly extending their delta to cover the full exchange
+                // instead of just the broadcast's share of it.
                 for (const avatar of getActiveGroupMembers()) {
                     withGroupMember(avatar, () => {
                         turnImpactBaselineByMember[avatar] = { ...engine.getEmotionState() };
@@ -1219,8 +1249,17 @@
                     });
                 }
             } else {
+                // Mirrors the group branch above: don't suppress the impact
+                // update for the user's own message — the popup's delta chips
+                // should reflect what it just did immediately, not sit frozen
+                // on the previous character reply's delta until the character
+                // responds again. turnImpactBaseline (state right before this)
+                // is still reused if the character goes on to reply this turn
+                // (below), so that reply's displayed delta correctly extends
+                // to cover the whole exchange instead of just its own share.
                 turnImpactBaseline = { ...engine.getEmotionState() };
-                engine.processMessageEmotion(msg.mes, true, { updateImpact: false, weight: getMessageWeight(true) });
+                const state = engine.processMessageEmotion(msg.mes, true, { weight: getMessageWeight(true) });
+                showEmotionBurst(state.lastImpact);
             }
             refreshAll();
         });
