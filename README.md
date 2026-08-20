@@ -4,6 +4,9 @@ A persistent, per-chat emotional state tracker for SillyTavern's main chat.
 The character's mood evolves from the conversation and feeds back into the
 prompt, so their tone shifts with how the conversation has actually gone.
 
+<img width="300" height="431" alt="638688698-db66ec9b-850c-4f46-bb70-6b7f3cd68fe2(1)" src="https://github.com/user-attachments/assets/123ffa23-b436-4c57-af3c-ce795815c5b2" />
+
+
 ## Features
 
 - 9-axis Plutchik mood (love, joy, trust, fear, surprise, sadness, disgust,
