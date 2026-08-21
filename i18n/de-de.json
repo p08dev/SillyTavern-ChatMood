@@ -18,6 +18,8 @@
     "Pins the mood button and popup in a fixed spot above the chat box instead of letting you drag them around.": "Fixiert den Stimmungs-Button und das Popup an einer festen Stelle über dem Chatfenster, statt sie frei verschiebbar zu machen.",
     "Time-based mood decay": "Zeitbasiertes Abklingen der Stimmung",
     "Off by default. Lets mood also drift back toward baseline as real days pass between messages (love lingers, fear/anger fade faster), on top of the small per-exchange drift that already happens either way.": "Standardmäßig deaktiviert. Lässt die Stimmung zusätzlich mit vergehenden Tagen zwischen Nachrichten zum Ausgangswert zurückdriften (Liebe klingt langsamer ab, Angst/Wut schneller), zusätzlich zu der kleinen Drift pro Austausch, die ohnehin immer stattfindet.",
+    "Track only mood (no prompt injection)": "Nur Stimmung verfolgen (kein Prompt-Eintrag)",
+    "Off by default. Keeps mood tracking, the badge, and the popup working as normal, but stops the emotional_state block from being sent to the model at all.": "Standardmäßig deaktiviert. Stimmungserfassung, Badge und Popup funktionieren weiterhin normal, aber der emotional_state-Block wird gar nicht mehr an das Modell gesendet.",
     "Keyword matching language": "Sprache der Stimmungserkennung",
     "English": "Englisch",
     "German": "Deutsch",

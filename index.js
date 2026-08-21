@@ -291,6 +291,23 @@
         context.saveSettingsDebounced();
     }
 
+    // ── Track only mood (no prompt injection) ───────────────────────────────
+    // Read live by refreshPrompt() (called via refreshAll(), rebuilt every
+    // turn already), so this takes effect immediately — no reload needed.
+    // Default off: mood is tracked and shown in the badge/popup either way;
+    // this only stops the <emotional_state> block from being sent to the
+    // LLM, for anyone who wants the tracker without it influencing replies.
+    function getPromptInjectionDisabled() {
+        return !!ctx().extensionSettings.ChatMood?.promptInjectionDisabled;
+    }
+
+    function setPromptInjectionDisabled(value) {
+        const context = ctx();
+        if (!context.extensionSettings.ChatMood) context.extensionSettings.ChatMood = {};
+        context.extensionSettings.ChatMood.promptInjectionDisabled = !!value;
+        context.saveSettingsDebounced();
+    }
+
     // ── Message-weighting settings ──────────────────────────────────────────
     // How strongly the user's message vs. the character's own reply moves the
     // needle in engine.analyzeTextEmotion — defaults match the reasoning
@@ -381,7 +398,7 @@
 
     function refreshPrompt() {
         const context = ctx();
-        const active = hasOpenChat() && !isMoodDisabledForChat();
+        const active = hasOpenChat() && !isMoodDisabledForChat() && !getPromptInjectionDisabled();
 
         if (!active || !context.groupId) {
             clearGroupPromptKeys();
@@ -1081,6 +1098,11 @@
                             ${tr('Time-based mood decay')}
                         </label>
                         <small>${tr('Off by default. Lets mood also drift back toward baseline as real days pass between messages (love lingers, fear/anger fade faster), on top of the small per-exchange drift that already happens either way.')}</small>
+                        <label class="checkbox_label" for="chatmood_no_prompt_injection">
+                            <input type="checkbox" id="chatmood_no_prompt_injection"${getPromptInjectionDisabled() ? ' checked' : ''}>
+                            ${tr('Track only mood (no prompt injection)')}
+                        </label>
+                        <small>${tr('Off by default. Keeps mood tracking, the badge, and the popup working as normal, but stops the emotional_state block from being sent to the model at all.')}</small>
                         <label for="chatmood_keyword_language">${tr('Keyword matching language')}</label>
                         <select id="chatmood_keyword_language">
                             <option value="en"${getKeywordLanguage() === 'en' ? ' selected' : ''}>${tr('English')}</option>
@@ -1136,6 +1158,11 @@
 
         jQuery('#chatmood_time_decay').on('change', (e) => {
             setTimeDecayEnabled(e.target.checked);
+            refreshAll();
+        });
+
+        jQuery('#chatmood_no_prompt_injection').on('change', (e) => {
+            setPromptInjectionDisabled(e.target.checked);
             refreshAll();
         });
 

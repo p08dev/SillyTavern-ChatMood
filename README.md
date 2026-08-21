@@ -33,6 +33,10 @@ prompt, so their tone shifts with how the conversation has actually gone.
   language, since a character card's language doesn't have to match it.
 - Token saver mode — drops the temperament line from the injected prompt,
   the single most expensive part of it.
+- Track-only mode — keeps mood tracking, the badge, and the popup working
+  as normal, but stops the `<emotional_state>` block from being sent to the
+  model at all, for anyone who wants the tracker without it influencing
+  replies.
 - Mood gently regresses toward the character's own drifted baseline every
   exchange, and a single message can't swing a value past a fixed cap, so
   values can't get permanently stuck at 0%/100% the way they could early
@@ -123,7 +127,9 @@ token saver mode, static position (off by default — pins the badge/popup
 above the chat box instead of letting you drag them around), time-based
 mood decay (off by default — turn on for mood to also drift back toward
 baseline as real days pass between messages, on top of the small
-per-exchange drift that already happens either way), keyword-matching
+per-exchange drift that already happens either way), track-only mode (off
+by default — stops the `<emotional_state>` block from being injected into
+the prompt while mood tracking and the UI keep working as usual), keyword-matching
 language (English/German, requires a reload), personality inference
 language (English/German/both, for MBTI + archetype detection from the
 character card — no reload needed), message-weighting sliders, and a
